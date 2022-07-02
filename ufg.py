@@ -4,6 +4,8 @@
 from collections import deque
 from enum import Enum
 
+import numpy as np
+
 from shapely.geometry import LineString
 from shapely.geometry import MultiLineString
 from shapely.geometry import Polygon
@@ -116,55 +118,146 @@ def _expand(points, directions, pads):
             expand_direction = get_expand_direction(line, pad.direction)
             for dimension in range(N_DIMENSIONS):
                 if expand_direction.value[dimension] != 0:
-                    translation = (
-                        pad.bounds[N_DIMENSIONS * (expand_direction.value[dimension] > 0) + dimension]
-                        - LineString(line).bounds[
-                            N_DIMENSIONS * (expand_direction.value[dimension] < 0) + dimension
-                        ]
-                    )
-                    return (
-                        True,
+                    break
+            translation = (
+                pad.bounds[N_DIMENSIONS * (expand_direction.value[dimension] > 0) + dimension]
+                - LineString(line).bounds[N_DIMENSIONS * (expand_direction.value[dimension] < 0) + dimension]
+            )
+            print(
+                f"translating {points[first_positive_proj_line_index]} through "
+                f"{points[(last_positive_proj_line_index + 1) % len(points)]}, inclusive, "
+                f"{translation} {expand_direction}"
+            )
+            new_points = points.copy()
+            new_directions = directions.copy()
+            for point_metaindex in range(
+                ((last_positive_proj_line_index + 2) - first_positive_proj_line_index) % len(new_points)
+            ):
+                point_index = first_positive_proj_line_index + point_metaindex
+                point_index %= len(new_points)
+                new_points[point_index] = tuple(
+                    x + translation if point_dimension == dimension else x
+                    for point_dimension, x in enumerate(new_points[point_index])
+                )
+            insert_point_queue = deque(
+                (
+                    (
                         first_positive_proj_line_index,
-                        last_positive_proj_line_index,
-                        expand_direction,
-                        translation,
-                    )
+                        points[first_positive_proj_line_index],
+                        0,
+                    ),
+                    (
+                        last_positive_proj_line_index + 2,
+                        points[(last_positive_proj_line_index + 1) % len(points)],
+                        1,
+                    ),
+                )
+            )
+            while len(insert_point_queue) > 0:
+                index, point, append = insert_point_queue.popleft()
+                index %= len(new_points)
+                if index == 0:
+                    index += len(new_points) * append
+                new_points.insert(index, point)
+                for queue_index, (future_index, future_point, future_append) in enumerate(insert_point_queue):
+                    if future_index < index:
+                        continue
+                    insert_point_queue[queue_index] = (future_index + 1, future_point, future_append)
+            insert_direction_queue = deque(
+                (
+                    first_positive_proj_line_index,
+                    last_positive_proj_line_index + 1,
+                )
+            )
+            while len(insert_direction_queue) > 0:
+                index = insert_direction_queue.popleft()
+                index %= len(new_directions)
+                new_directions.insert(index, None)
+                for queue_index, future_index in enumerate(insert_direction_queue):
+                    if future_index < index:
+                        continue
+                    insert_direction_queue[queue_index] = future_index + 1
+            return (True, new_points, new_directions)
     return (False,)
 
 
+def _make_valid(points, directions):
+    for line_index, line in linewise(points):
+        for other_line_index, other_line in linewise3(points, line_index + 2, line_index - 1, +1):
+            if not LineString(line).intersects(LineString(other_line)):
+                continue
+            perpendicular_vector = np.cross(
+                np.concatenate((np.array(line[1]) - np.array(line[0]), (0,))),
+                np.concatenate((np.zeros(N_DIMENSIONS), (1,))),
+            )
+            dot = np.dot(np.array(other_line[1]) - np.array(other_line[0]), perpendicular_vector[:-1])
+            if dot == 0:
+                continue
+            if dot > 0:
+                start_index, stop_index = line_index, other_line_index
+            else:
+                start_index, stop_index = other_line_index, line_index
+            new_points = points.copy()
+            new_directions = directions.copy()
+            new_directions[start_index] = None
+            start_index += 1
+            stop_index += 1
+            start_index %= len(new_points)
+            stop_index %= len(new_points)
+            for index in sorted(
+                (
+                    (start_index + metaindex) % len(new_points)
+                    for metaindex in range((stop_index - start_index) % len(new_points))
+                ),
+                reverse=True,
+            ):
+                del new_points[index]
+                del new_directions[index]
+            if not Polygon(new_points).is_valid:
+                continue
+            if not Polygon(new_points).covers(Polygon(points)):
+                continue
+            return (True, new_points, new_directions)
+    return (False,)
+
+
+def debug_plot(points, directions, pads):
+    fig, ax = plt.subplots()
+    for pad in pads:
+        x, y = zip(*pad.exterior.coords)
+        plt.plot(x, y, "r")
+    for line_index, line in linewise(points):
+        if directions[line_index] is None:
+            color = "k"
+        else:
+            for dimension, color in zip(range(N_DIMENSIONS), ("y", "c")):
+                if directions[line_index].value[dimension] != 0:
+                    break
+        plt.plot((line[0][0], line[1][0]), (line[0][1], line[1][1]), color)
+    ax.set_aspect("equal")
+
+
 def expand(points, directions, pads):
+    print(points)
+    print(directions)
+    debug_plot(points, directions, pads)
     while True:
         status, *optional = _expand(points, directions, pads)
         if not status:
             break
-        first_line_index, last_line_index, expand_direction, translation = optional
-        first_point = points[first_line_index]
-        last_point = points[(last_line_index + 1) % len(points)]
-        for dimension in range(N_DIMENSIONS):
-            if expand_direction.value[dimension] != 0:
-                for point_metaindex in range(((last_line_index + 2) - first_line_index) % len(points)):
-                    point_index = first_line_index + point_metaindex
-                    point_index %= len(points)
-                    points[point_index] = tuple(
-                        x + translation if point_dimension == dimension else x
-                        for point_dimension, x in enumerate(points[point_index])
-                    )
-                insert_point_queue = deque(((first_line_index, first_point), (last_line_index + 2, last_point)))
-                while len(insert_point_queue) > 0:
-                    index, point = insert_point_queue.popleft()
-                    points.insert(index % len(points), point)
-                    for queue_index, (future_index, future_point) in enumerate(insert_point_queue):
-                        if future_index < index:
-                            continue
-                        insert_point_queue[queue_index] = (future_index + 1, future_point)
-                insert_direction_queue = deque((first_line_index, last_line_index + 1))
-                while len(insert_direction_queue) > 0:
-                    index = insert_direction_queue.popleft()
-                    directions.insert(index % len(directions), None)
-                    for queue_index, future_index in enumerate(insert_direction_queue):
-                        if future_index < index:
-                            continue
-                        insert_direction_queue[queue_index] = future_index + 1
+        points, directions = optional
+        print(points)
+        print(directions)
+        debug_plot(points, directions, pads)
+        while True:
+            status, *optional = _make_valid(points, directions)
+            if not status:
+                break
+            points, directions = optional
+            print(points)
+            print(directions)
+            debug_plot(points, directions, pads)
+    return points
 
 
 def _cut(points, pads):
@@ -183,21 +276,21 @@ def _cut(points, pads):
 
 
 def cut(points, pads):
-    return linemerge(_cut(points, pads))
+    lines = linemerge(_cut(points, pads))
+    if not hasattr(lines, "geoms"):
+        lines = MultiLineString((lines,))
+    return lines
 
 
 def plot(points, directions, pads):
+    silkscreen = cut(expand(points, directions, pads), pads)
     fig, ax = plt.subplots()
     for pad in pads:
         x, y = zip(*pad.exterior.coords)
         plt.plot(x, y, "r")
-    x, y = zip(*(tuple(points) + (points[0],)))
-    plt.plot(x, y, "g")
-    expand(points, directions, pads)
-    silkscreen = cut(points, pads)
-    if not hasattr(silkscreen, "geoms"):
-        silkscreen = MultiLineString((silkscreen,))
-    for silkscreen_line_string in MultiLineString(silkscreen).geoms:
+    for line_index, line in linewise(points):
+        plt.plot((line[0][0], line[1][0]), (line[0][1], line[1][1]), "g")
+    for silkscreen_line_string in silkscreen.geoms:
         x, y = zip(*silkscreen_line_string.coords)
         plt.plot(x, y, "k")
     ax.set_aspect("equal")
