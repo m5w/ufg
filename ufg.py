@@ -256,7 +256,11 @@ def _make_valid(points, directions):
                 continue
             new_body = Polygon(new_points)
             if not new_body.is_valid:
-                continue
+                status, *optional = _make_valid(new_points, new_directions)
+                if not status:
+                    continue
+                new_points, new_directions = optional
+                new_body = Polygon(new_points)
             if not new_body.covers(Polygon(points)):
                 continue
             return (True, new_points, new_directions)
@@ -282,16 +286,17 @@ def _debug_plot(points, directions, pads):
 def expand(points, directions, pads, debug=False):
     logger.debug(f"points = {points}")
     logger.debug(f"directions = {directions}")
-    body = Polygon(points)
-    if not body.exterior.is_ccw:
+    if debug:
+        _debug_plot(points, directions, pads)
+    if not Polygon(points).exterior.is_ccw:
         logger.debug("reversing clockwise points")
         points.reverse().rotate()
         directions.reverse()
         directions = deque((Direction(tuple(-np.array(direction.value))) if direction is not None else direction))
         logger.debug(f"points = {points}")
         logger.debug(f"directions = {directions}")
-    if debug:
-        _debug_plot(points, directions, pads)
+        if debug:
+            _debug_plot(points, directions, pads)
     while True:
         status, *optional = _expand(points, directions, pads)
         if not status:
