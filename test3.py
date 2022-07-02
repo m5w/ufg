@@ -1,6 +1,8 @@
+# Copyright (C) 2022 Matthew Marting
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 from argparse import ArgumentParser
 from collections import deque
-import logging
 
 from shapely.geometry import Polygon
 
