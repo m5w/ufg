@@ -3,6 +3,7 @@
 
 from collections import deque
 from enum import Enum
+import logging
 
 import numpy as np
 
@@ -14,6 +15,10 @@ from shapely.ops import linemerge
 import matplotlib.pyplot as plt
 
 
+logging.basicConfig()
+logger = logging.getLogger(__name__)
+
+
 def linewise(points):
     for point1_index, point1 in enumerate(points):
         point2_index = point1_index + 1
@@ -22,6 +27,9 @@ def linewise(points):
 
 
 def linewise3(points, start_point_index, stop_point_index, step):
+    point_metaindex_stop = (stop_point_index - start_point_index) // step % len(points)
+    if point_metaindex_stop == 0:
+        point_metaindex_stop = len(points)
     for point_metaindex in range((stop_point_index - start_point_index) // step % len(points)):
         point1_index = start_point_index + step * point_metaindex
         point2_index = point1_index + 1
@@ -60,26 +68,50 @@ def is_proj_negative_to(m, direction, l):
 
 
 def find_last_positive_proj_line(points, directions, pad, line_index, line, step):
-    already_found_zero_proj_line = False
-    for reverse_line_index, reverse_line in linewise3(points, line_index - step, line_index, -step):
-        if pad.direction.is_perpendicular_to(directions[reverse_line_index]) or is_proj_zero(
-            reverse_line, pad.direction
-        ):
-            already_found_zero_proj_line = True
-            continue
-        if is_proj_negative_to(reverse_line, pad.direction, line):
-            break
-        if already_found_zero_proj_line:
-            break
     last_positive_proj_line_index = line_index
-    for forward_line_index, forward_line in linewise3(points, line_index, reverse_line_index, step):
+    next_last_positive_proj_line_index = line_index
+    _debug_next_last_positive_proj_line = line
+    already_found_perpendicular_line = False
+    logger.debug(
+        #
+        f"searching { {+1: 'counter-clockwise', -1: 'clockwise'}[step] } for "
+        f"last line positive to {line} with respect to {pad.bounds} "
+        f"({pad.direction.name})"
+    )
+    for forward_line_index, forward_line in linewise3(points, line_index + step, line_index, step):
         if pad.direction.is_perpendicular_to(directions[forward_line_index]):
-            break
+            logger.debug(
+                #
+                f"{forward_line} is perpendicular to {pad.bounds} "
+                f"({pad.direction.name})"
+            )
+            already_found_perpendicular_line = True
+            continue
         if is_proj_zero(forward_line, pad.direction):
+            logger.debug(
+                #
+                f"{forward_line} is zero to {pad.bounds} "
+                f"({pad.direction.name})"
+            )
             continue
         if is_proj_negative_to(forward_line, pad.direction, line):
+            logger.debug(
+                #
+                f"{forward_line} is negative to {line} with respect to {pad.bounds} "
+                f"({pad.direction.name})"
+            )
+            logger.debug(f"selecting {_debug_next_last_positive_proj_line}")
+            last_positive_proj_line_index = next_last_positive_proj_line_index
+            if already_found_perpendicular_line:
+                break
             continue
-        last_positive_proj_line_index = forward_line_index
+        if already_found_perpendicular_line:
+            logger.debug(f"already found perpendicular line, so ignoring {forward_line}")
+            continue
+        logger.debug(f"marking {forward_line}")
+        next_last_positive_proj_line_index = forward_line_index
+        _debug_next_last_positive_proj_line = forward_line
+    logger.debug("done")
     return last_positive_proj_line_index
 
 
@@ -99,7 +131,8 @@ def get_expand_direction(line, direction):
 def _expand(points, directions, pads):
     for line_index, line in linewise(points):
         for pad in pads:
-            if not (LineString(line).intersects(pad) and not LineString(line).touches(pad)):
+            line_string = LineString(line)
+            if not (line_string.intersects(pad) and not line_string.touches(pad)):
                 continue
             if pad.direction.is_perpendicular_to(directions[line_index]):
                 continue
@@ -121,13 +154,19 @@ def _expand(points, directions, pads):
                     break
             translation = (
                 pad.bounds[N_DIMENSIONS * (expand_direction.value[dimension] > 0) + dimension]
-                - LineString(line).bounds[N_DIMENSIONS * (expand_direction.value[dimension] < 0) + dimension]
+                - line_string.bounds[N_DIMENSIONS * (expand_direction.value[dimension] < 0) + dimension]
             )
-            print(
+            logger.debug(
                 f"translating {points[first_positive_proj_line_index]} through "
                 f"{points[(last_positive_proj_line_index + 1) % len(points)]}, inclusive, "
-                f"{translation} {expand_direction}"
+                f"{translation} {expand_direction.name}"
             )
+            if translation < 0:
+                logger.debug(
+                    #
+                    "note: WEST and SOUTH translations are negative.  "
+                    "'-1.0 WEST' means '1.0 to the west'."
+                )
             new_points = points.copy()
             new_directions = directions.copy()
             for point_metaindex in range(
@@ -157,7 +196,7 @@ def _expand(points, directions, pads):
                 index, point, append = insert_point_queue.popleft()
                 index %= len(new_points)
                 if index == 0:
-                    index += len(new_points) * append
+                    index = len(new_points) * append
                 new_points.insert(index, point)
                 for queue_index, (future_index, future_point, future_append) in enumerate(insert_point_queue):
                     if future_index < index:
@@ -213,15 +252,18 @@ def _make_valid(points, directions):
             ):
                 del new_points[index]
                 del new_directions[index]
-            if not Polygon(new_points).is_valid:
+            if len(new_points) < 3:
                 continue
-            if not Polygon(new_points).covers(Polygon(points)):
+            new_body = Polygon(new_points)
+            if not new_body.is_valid:
+                continue
+            if not new_body.covers(Polygon(points)):
                 continue
             return (True, new_points, new_directions)
     return (False,)
 
 
-def debug_plot(points, directions, pads):
+def _debug_plot(points, directions, pads):
     fig, ax = plt.subplots()
     for pad in pads:
         x, y = zip(*pad.exterior.coords)
@@ -237,26 +279,37 @@ def debug_plot(points, directions, pads):
     ax.set_aspect("equal")
 
 
-def expand(points, directions, pads):
-    print(points)
-    print(directions)
-    debug_plot(points, directions, pads)
+def expand(points, directions, pads, debug=False):
+    logger.debug(f"points = {points}")
+    logger.debug(f"directions = {directions}")
+    body = Polygon(points)
+    if not body.exterior.is_ccw:
+        logger.debug("reversing clockwise points")
+        points.reverse().rotate()
+        directions.reverse()
+        directions = deque((Direction(tuple(-np.array(direction.value))) if direction is not None else direction))
+        logger.debug(f"points = {points}")
+        logger.debug(f"directions = {directions}")
+    if debug:
+        _debug_plot(points, directions, pads)
     while True:
         status, *optional = _expand(points, directions, pads)
         if not status:
             break
         points, directions = optional
-        print(points)
-        print(directions)
-        debug_plot(points, directions, pads)
+        logger.debug(f"points = {points}")
+        logger.debug(f"directions = {directions}")
+        if debug:
+            _debug_plot(points, directions, pads)
         while True:
             status, *optional = _make_valid(points, directions)
             if not status:
                 break
             points, directions = optional
-            print(points)
-            print(directions)
-            debug_plot(points, directions, pads)
+            logger.debug(f"points = {points}")
+            logger.debug(f"directions = {directions}")
+            if debug:
+                _debug_plot(points, directions, pads)
     return points
 
 
@@ -282,8 +335,8 @@ def cut(points, pads):
     return lines
 
 
-def plot(points, directions, pads):
-    silkscreen = cut(expand(points, directions, pads), pads)
+def plot(points, directions, pads, debug=False):
+    silkscreen = cut(expand(points, directions, pads, debug=debug), pads)
     fig, ax = plt.subplots()
     for pad in pads:
         x, y = zip(*pad.exterior.coords)

@@ -1,11 +1,20 @@
+# Copyright (C) 2022 Matthew Marting
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 from argparse import ArgumentParser
 from collections import deque
 from itertools import count
+import logging
 from math import pi, cos, sin, atan2
 from random import vonmisesvariate, lognormvariate, choices, randint
+
 import numpy as np
+
 from shapely.geometry import LineString, Polygon
+
 import matplotlib.pyplot as plt
+
+import ufg
 from ufg import linewise, Direction, plot
 
 
@@ -16,13 +25,16 @@ def calc(r, theta):
     return dx, dy, theta
 
 
-def main(points, directions, pads):
-    plot(points, directions, pads)
+def main(points, directions, pads, debug=False):
+    if debug:
+        logging.getLogger("ufg").setLevel(logging.DEBUG)
+    plot(points, directions, pads, debug=debug)
     plt.show()
 
 
 if __name__ == "__main__":
     parser = ArgumentParser(allow_abbrev=False)
+    parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("n_points", type=int)
     parser.add_argument("r_mu", type=float)
     parser.add_argument("r_sigma", type=float)
@@ -57,8 +69,6 @@ if __name__ == "__main__":
         points.append(next_point)
         theta = next_theta
     body = Polygon(points)
-    if not body.exterior.is_ccw:
-        raise RuntimeError("clockwise points: not supported")
 
     directions = deque()
     for line_index, line in linewise(points):
@@ -96,4 +106,4 @@ if __name__ == "__main__":
     print(directions)
     print(tuple((pad.bounds, pad.direction) for pad in pads))
 
-    main(points, directions, pads)
+    main(points, directions, pads, debug=args.verbose)

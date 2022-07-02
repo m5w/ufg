@@ -1,0 +1,5 @@
+points = A B C
+directions = AB BC CA
+
+points = A C B = points.reverse().rotate()
+directions = AC CB BA = -CA -BC -AB = -directions.reverse()
